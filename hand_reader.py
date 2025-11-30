@@ -56,6 +56,7 @@ serverAddressPort = ("127.0.0.1", 5052)
 swipe_buffer = deque(maxlen=20); zoom_buffer = deque(maxlen=10); rotate_buffer = deque(maxlen=15)
 cooldown_period = 1.0; last_gesture_time = 0
 min_swipe_dist = 200; min_swipe_speed = 500; 
+zoom_accum_threshold = 100; rotate_accum_threshold = math.radians(35) # [복구] 임계값 재정의
 
 def check_swipe_onehand(now):
     if len(swipe_buffer) < 5: return None
@@ -81,26 +82,16 @@ while True:
     # --- [1] 아두이노 수신 ---
     if arduino and arduino.in_waiting > 0:
         try:
-            # 버퍼에 있는 데이터를 모두 읽어서 처리 (딜레이 방지)
             while arduino.in_waiting:
                 line = arduino.readline().decode('utf-8', errors='ignore').strip()
-                
-                # 1. 센서 데이터 (기존)
                 if line == "1" or line == "2":
                     msg = f"SENSOR:{line}"
                     sock.sendto(str.encode(msg), serverAddressPort)
                     print(f"Unity Send >> {msg}")
-                
-                # 2. [추가됨] 위치 데이터 (POS:12345)
                 elif line.startswith("POS:"):
-                    # Unity로 그대로 전송
                     sock.sendto(str.encode(line), serverAddressPort)
-                    
-                    # 화면 표시를 위해 값 파싱
-                    try:
-                        current_pos_step = int(line.split(":")[1])
+                    try: current_pos_step = int(line.split(":")[1])
                     except: pass
-                    
         except: pass
 
     # --- [2] 비전 처리 ---
@@ -116,7 +107,63 @@ while True:
             data = [coord for lm in lmList for coord in (lm[0], height - lm[1], lm[2])]
             sock.sendto(str.encode(str(data)), serverAddressPort)
             
-            if len(hands) == 1:
+            # ====================================================
+            # [복구됨] 양손 제스처 (ZOOM & ROTATE)
+            # ====================================================
+            if len(hands) == 2:
+                h1, h2 = hands[0], hands[1]
+                c1 = np.array(h1["center"], dtype=float)
+                c2 = np.array(h2["center"], dtype=float)
+
+                fingers1 = detector.fingersUp(h1)
+                fingers2 = detector.fingersUp(h2)
+
+                # 양손 펴짐 -> 줌
+                both_open = fingers1 == [1,1,1,1,1] and fingers2 == [1,1,1,1,1]
+                # 양손 주먹 -> 회전
+                both_fist = fingers1 == [0,0,0,0,0] and fingers2 == [0,0,0,0,0]
+
+                # ---- 1️⃣ 줌 (양손 펴짐) ----
+                if both_open:
+                    dist_hands = np.linalg.norm(c2 - c1)
+                    zoom_buffer.append(dist_hands)
+
+                    if len(zoom_buffer) >= 5:
+                        diff = zoom_buffer[-1] - zoom_buffer[0]
+                        if abs(diff) > zoom_accum_threshold:
+                            gesture = "zoom in" if diff > 0 else "zoom out"
+                            last_gesture_time = now
+                            zoom_buffer.clear()
+                            rotate_buffer.clear()
+                            print(f"Gesture: {gesture}")
+                            sock.sendto(str.encode(gesture), serverAddressPort)
+
+                # ---- 2️⃣ 회전 (양손 주먹) ----
+                elif both_fist:
+                    v_now = c2 - c1
+                    rotate_buffer.append(v_now)
+
+                    if len(rotate_buffer) >= 5:
+                        total_angle = 0
+                        rb = list(rotate_buffer)
+                        for v1, v2 in zip(rb[:-1], rb[1:]):
+                            cross_z = v1[0]*v2[1] - v1[1]*v2[0]
+                            dot = np.dot(v1, v2)
+                            angle = math.atan2(cross_z, dot)
+                            total_angle += angle
+
+                        if abs(total_angle) > rotate_accum_threshold:
+                            gesture = "rotate ccw" if total_angle > 0 else "rotate cw"
+                            last_gesture_time = now
+                            rotate_buffer.clear()
+                            zoom_buffer.clear()
+                            print(f"Gesture: {gesture}")
+                            sock.sendto(str.encode(gesture), serverAddressPort)
+                            
+            # ====================================================
+            # 한손 제스처 (SWIPE)
+            # ====================================================
+            elif len(hands) == 1:
                 swipe_buffer.append((now, hands[0]["center"][0], hands[0]["center"][1]))
                 swipe = check_swipe_onehand(now)
                 if swipe:
@@ -157,9 +204,11 @@ while True:
     cv2.putText(img, f"Speed: {current_speed}", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
     cv2.putText(img, f"Status: {status}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 100, 255), 2)
     cv2.putText(img, f"Motor: {motor_state_txt}", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.8, motor_color, 2)
-    
-    # [추가됨] 현재 스텝 수 표시
     cv2.putText(img, f"Step Pos: {current_pos_step}", (20, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2)
+    
+    # 양손/한손 모드 표시
+    mode_text = "Two Hands" if hands and len(hands) == 2 else "One Hand"
+    cv2.putText(img, mode_text, (500, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
     if gesture != "None":
         cv2.putText(img, gesture, (50, 180), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 3)
