@@ -5,7 +5,10 @@
 // ==========================
 const int irSensor1 = A1; 
 const int irSensor2 = A2; 
+
 int threshold = 500;
+
+const long offsetSteps = 100;
 
 // 모터 핀
 const int STEP_PIN = 2;
@@ -46,7 +49,7 @@ void setup() {
   // 초기 상태 0
   stepper.setMaxSpeed(0);     
   stepper.setAcceleration(motorAccel);  
-  stepper.setCurrentPosition(0); 
+    stepper.setCurrentPosition(0); 
 }
 
 void loop() {
@@ -114,19 +117,44 @@ void readSensors() {
   int val1 = analogRead(irSensor1);
   int val2 = analogRead(irSensor2);
 
+  // --- 센서 1 (아래쪽) 감지 ---
   if (val1 < threshold) {
     if (!s1Triggered && lastTriggered != 1) {
       Serial.println("1"); 
-      s1Triggered = true; lastTriggered = 1;   
-    }
-  } else { s1Triggered = false; }
+      
+      // [핵심 수정] 0이 아니라 -100(offset)으로 설정합니다.
+      // 모터가 정방향(양수 속도)으로 돌고 있다면: 현재 위치를 -100으로 설정
+      // 모터가 역방향(음수 속도)으로 돌고 있다면: 현재 위치를 +100으로 설정 (거꾸로니까)
+      
+      long currentDir = (motorSpeed >= 0) ? 1 : -1; 
+      
+      // "지금 위치는 0이 되기 100스텝 전이다" 라고 선언
+      stepper.setCurrentPosition(-offsetSteps * currentDir); 
+      
+      // 목표 지점 재설정 (가던 길 계속 가도록)
+      stepper.moveTo(1000000000 * currentDir);      
 
+      s1Triggered = true; 
+      lastTriggered = 1;   
+    }
+  } else {
+    s1Triggered = false;
+  }
+
+  // --- 센서 2 (위쪽) 감지 ---
   if (val2 < threshold) {
     if (!s2Triggered && lastTriggered != 2) {
       Serial.println("2"); 
-      s2Triggered = true; lastTriggered = 2;   
+      
+      // 위쪽 센서도 보정이 필요하다면 여기서 비슷하게 처리 가능
+      // 일단 아래쪽(A1)만 중요하므로 여긴 둠
+      
+      s2Triggered = true;
+      lastTriggered = 2;   
     }
-  } else { s2Triggered = false; }
+  } else {
+    s2Triggered = false;
+  }
 }
 
 void serialEvent() {
